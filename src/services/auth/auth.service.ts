@@ -383,6 +383,11 @@ export const authService = {
 
     /**
      * Helper to create a session and return tokens
+     *
+     * Flow:
+     * 1. Create session with a temporary placeholder hash
+     * 2. Generate the real refresh token using the newly assigned session.id
+     * 3. Update the session with the correct hash — single source of truth
      */
     async createSession(userId: string): Promise<TokenPair> {
         const user = await userRepository.findById(userId);
@@ -391,38 +396,28 @@ export const authService = {
         }
 
         const isPremium = await userRepository.hasPremiumAccess(user.id);
-
-        const refreshToken = generateRefreshToken({
-            userId: user.id,
-            sessionId: '',
-        });
-
         const expiresAt = new Date(Date.now() + getRefreshTokenExpiresIn() * 1000);
 
+        // Step 1: Create session with a temp placeholder (sessionId not known yet)
+        const placeholderToken = generateRefreshToken({ userId: user.id, sessionId: 'placeholder' });
         const session = await sessionRepository.create({
             userId: user.id,
-            refreshToken,
+            refreshToken: placeholderToken,
             expiresAt,
         });
 
-        const accessToken = generateAccessToken({
-            userId: user.id,
-            sessionId: session.id,
-            isPremium,
-        });
+        // Step 2: Generate real tokens now that we have session.id
+        const finalRefreshToken = generateRefreshToken({ userId: user.id, sessionId: session.id });
+        const accessToken = generateAccessToken({ userId: user.id, sessionId: session.id, isPremium });
 
-        console.log(`[AuthService] Session created successfully. SessionID: ${session.id}, UserID: ${user.id}`);
-
-        const finalRefreshToken = generateRefreshToken({
-            userId: user.id,
-            sessionId: session.id,
-        });
-
+        // Step 3: Update session with correct refresh token hash
         const updatedSession = await sessionRepository.updateRefreshToken(session.id, finalRefreshToken, expiresAt);
         if (!updatedSession) {
+            await sessionRepository.delete(session.id);
             throw new AuthError('Session synchronization error', 'AUTH_SESSION_ERROR', 500);
         }
 
+        console.log(`[AuthService] Session created. SessionID: ${session.id}, UserID: ${user.id}, ExpiresAt: ${expiresAt.toISOString()}`);
 
         return {
             accessToken,
